@@ -38,7 +38,7 @@ jobs:
       - name: Create results directory
         run: mkdir -p snyk-results
       
-      # Use Snyk Action for better integration
+      # Use Snyk CLI directly for better control
       - name: Set up Snyk
         uses: snyk/actions/setup@master
         
@@ -46,13 +46,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          # Remove the cache option that's causing the error
           
-      # Try to install dependencies if there's a package.json
+      # Install dependencies properly for Juice Shop
       - name: Install dependencies if present
         run: |
           if [ -f package.json ]; then
-            npm ci || npm install || echo "Failed to install dependencies, will try with Snyk anyway"
+            # For Juice Shop, we need to use npm install (not npm ci)
+            npm install || echo "Failed to install dependencies, will try with Snyk anyway"
           fi
         continue-on-error: true
       
@@ -61,26 +61,28 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           echo "=== Running Snyk SAST Scan (Code Analysis) ==="
-          # First try the official action for code analysis
-          snyk code test --json > snyk-results/sast-results.json || true
+          # Run Snyk Code with explicit project path
+          snyk code test --json --org=${{ secrets.SNYK_ORG_ID }} > snyk-results/sast-results.json || true
           
-          # If the first attempt fails, try with Docker
-          if [ ! -s snyk-results/sast-results.json ]; then
-            echo "Retrying with Docker approach..."
-            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-              snyk/snyk-cli:docker code test --sarif-file-output=snyk-results/sast-results.sarif || true
-            
-            # Convert SARIF to JSON if needed
-            if [ -s snyk-results/sast-results.sarif ] && [ ! -s snyk-results/sast-results.json ]; then
-              cat snyk-results/sast-results.sarif > snyk-results/sast-results.json
-            fi
-          fi
-          
-          # Human-readable output
+          # Check if results were generated
           if [ -s snyk-results/sast-results.json ]; then
             echo "SAST scan completed successfully."
+            echo "Found issues:" 
+            grep -c '"severity":' snyk-results/sast-results.json || echo "0"
           else 
-            echo "SAST scan did not produce results. Check authentication and project structure."
+            echo "SAST scan did not produce results. Trying alternative method..."
+            
+            # Alternative approach - use docker directly
+            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
+              snyk/snyk-cli code test --json > snyk-results/sast-results.json || true
+            
+            if [ -s snyk-results/sast-results.json ]; then
+              echo "SAST scan completed with alternative method."
+              echo "Found issues:" 
+              grep -c '"severity":' snyk-results/sast-results.json || echo "0"
+            else
+              echo "Both SAST scan methods failed to produce results."
+            fi
           fi
       
       - name: Run Snyk SCA Scan (Dependencies)
@@ -89,41 +91,27 @@ jobs:
         run: |
           echo "=== Running Snyk SCA Scan (Dependencies) ==="
           
-          # Try the direct native approach first
-          snyk test --all-projects --json > snyk-results/sca-results.json || true
+          # Run with specific project file for Juice Shop
+          snyk test --file=package.json --json --org=${{ secrets.SNYK_ORG_ID }} > snyk-results/sca-results.json || true
           
-          # If that fails, try with autodetect enabled
-          if [ ! -s snyk-results/sca-results.json ]; then
-            echo "Retrying with --all-projects and Docker..."
-            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-              snyk/snyk-cli:docker test --all-projects --json > snyk-results/sca-results.json || true
-          fi
-          
-          # If still fails, try project-specific files
-          if [ ! -s snyk-results/sca-results.json ]; then
-            echo "Trying project-specific files..."
-            # For Node.js
-            if [ -f package.json ]; then
-              docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-                snyk/snyk-cli:docker test --file=package.json --json > snyk-results/sca-results.json || true
-            fi
-            # For Python
-            if [ -f requirements.txt ]; then
-              docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-                snyk/snyk-cli:docker test --file=requirements.txt --json > snyk-results/sca-results.json || true
-            fi
-            # For Java
-            if [ -f pom.xml ]; then
-              docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-                snyk/snyk-cli:docker test --file=pom.xml --json > snyk-results/sca-results.json || true
-            fi
-          fi
-          
-          # Human-readable output
+          # Check if results were generated
           if [ -s snyk-results/sca-results.json ]; then
             echo "SCA scan completed successfully."
+            echo "Found vulnerabilities:" 
+            grep -c '"severity":' snyk-results/sca-results.json || echo "0"
           else
-            echo "SCA scan did not produce results. Check project structure and dependencies."
+            echo "First SCA scan attempt failed. Trying with all-projects flag..."
+            
+            # Try with all-projects flag
+            snyk test --all-projects --json --org=${{ secrets.SNYK_ORG_ID }} > snyk-results/sca-results.json || true
+            
+            if [ -s snyk-results/sca-results.json ]; then
+              echo "SCA scan completed with all-projects flag."
+              echo "Found vulnerabilities:" 
+              grep -c '"severity":' snyk-results/sca-results.json || echo "0"
+            else
+              echo "Both SCA scan methods failed to produce results."
+            fi
           fi
           
       - name: Generate Snyk Summary
@@ -131,7 +119,6 @@ jobs:
           echo "=== Snyk Scan Summary ===" > snyk-results/summary.txt
           echo "SAST Results:" >> snyk-results/summary.txt
           if [ -f snyk-results/sast-results.json ] && [ -s snyk-results/sast-results.json ]; then
-            # Use a more robust approach that doesn't rely on specific JSON structure
             SAST_VULNS=$(grep -c '"severity":' snyk-results/sast-results.json || echo "0")
             echo "- Found approximately $SAST_VULNS code issues" >> snyk-results/summary.txt
           else
@@ -140,7 +127,6 @@ jobs:
           
           echo "SCA Results:" >> snyk-results/summary.txt
           if [ -f snyk-results/sca-results.json ] && [ -s snyk-results/sca-results.json ]; then
-            # Use a more robust approach that doesn't rely on specific JSON structure
             SCA_VULNS=$(grep -c '"severity":' snyk-results/sca-results.json || echo "0")
             echo "- Found approximately $SCA_VULNS dependency vulnerabilities" >> snyk-results/summary.txt
           else
@@ -203,21 +189,32 @@ jobs:
       
       - name: Generate SBOM
         run: |
-          # First, check if cyclonedx is supported in this Trivy version
-          if docker run --rm aquasec/trivy:latest --help | grep -q "cyclonedx"; then
-            # Use CycloneDX format
-            docker run --rm -v "$(pwd):/src" \
-              -v /tmp/trivy-cache:/root/.cache \
-              aquasec/trivy:latest sbom /src \
-              --format cyclonedx \
-              --output /src/trivy-output/sbom.json || true
+          # Generate SBOM directly without checking cyclonedx support
+          # For npm projects like Juice Shop
+          docker run --rm -v "$(pwd):/src" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /src \
+            --format cyclonedx \
+            --output /src/trivy-output/sbom.cyclonedx.json || true
+            
+          # Alternative SBOM format (JSON)
+          docker run --rm -v "$(pwd):/src" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /src \
+            --format json \
+            --output /src/trivy-output/sbom.json || true
+            
+          # Check if either SBOM was generated
+          if [ -s trivy-output/sbom.cyclonedx.json ] || [ -s trivy-output/sbom.json ]; then
+            echo "SBOM generation successful"
           else
-            # Fallback to standard JSON if cyclonedx isn't supported
-            docker run --rm -v "$(pwd):/src" \
-              -v /tmp/trivy-cache:/root/.cache \
-              aquasec/trivy:latest sbom /src \
-              --format json \
-              --output /src/trivy-output/sbom.json || true
+            echo "SBOM generation failed with standard methods, trying direct NPM approach"
+            
+            # Use NPM's built-in capability if package.json exists
+            if [ -f package.json ]; then
+              npm list --json > trivy-output/npm-sbom.json || true
+              echo "Generated NPM dependency SBOM as fallback"
+            fi
           fi
       
       - name: Upload Trivy Results
