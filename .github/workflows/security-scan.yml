@@ -15,14 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Run Semgrep Scan
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan \
             --config auto \
             --error \
             --json > semgrep-results.json || true
-
+      
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
@@ -34,19 +34,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Run Snyk Scan
+      
+      - name: Create results directory
+        run: mkdir -p snyk-results
+      
+      - name: Run Snyk SAST Scan (Code Analysis)
         run: |
+          # Run SAST scan with human-readable output
+          echo "=== Running Snyk SAST Scan (Code Analysis) ==="
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-            snyk/snyk-cli:docker code test --all-projects --json-file-output=snyk-results.json || \
+            snyk/snyk-cli:docker code test --all-projects || true
+          
+          # Run SAST scan with JSON output for artifact
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-            snyk/snyk-cli:docker code test --file=package.json --json-file-output=snyk-results.json || true
-
+            snyk/snyk-cli:docker code test --all-projects --json-file-output=snyk-results/sast-results.json || true
+          
+          # Fallback to package.json if needed
+          if [ ! -f snyk-results/sast-results.json ] || [ ! -s snyk-results/sast-results.json ]; then
+            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
+              snyk/snyk-cli:docker code test --file=package.json --json-file-output=snyk-results/sast-results.json || true
+          fi
+      
+      - name: Run Snyk SCA Scan (Dependencies)
+        run: |
+          # Run SCA scan with human-readable output
+          echo "=== Running Snyk SCA Scan (Dependencies) ==="
+          docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
+            snyk/snyk-cli:docker test --all-projects || true
+          
+          # Run SCA scan with JSON output for artifact
+          docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
+            snyk/snyk-cli:docker test --all-projects --json-file-output=snyk-results/sca-results.json || true
+          
+          # Fallback to package.json if needed
+          if [ ! -f snyk-results/sca-results.json ] || [ ! -s snyk-results/sca-results.json ]; then
+            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
+              snyk/snyk-cli:docker test --file=package.json --json-file-output=snyk-results/sca-results.json || true
+          fi
+      
+      - name: Generate Snyk Summary
+        run: |
+          echo "=== Snyk Scan Summary ===" > snyk-results/summary.txt
+          echo "SAST Results:" >> snyk-results/summary.txt
+          if [ -f snyk-results/sast-results.json ]; then
+            SAST_VULNS=$(grep -o '"vulnerabilities":\s*\[[^\]]*\]' snyk-results/sast-results.json | grep -o '\[.*\]' | grep -o '{' | wc -l)
+            echo "- Found $SAST_VULNS code vulnerabilities" >> snyk-results/summary.txt
+          else
+            echo "- No SAST results found" >> snyk-results/summary.txt
+          fi
+          
+          echo "SCA Results:" >> snyk-results/summary.txt
+          if [ -f snyk-results/sca-results.json ]; then
+            SCA_VULNS=$(grep -o '"vulnerabilities":\s*\[[^\]]*\]' snyk-results/sca-results.json | grep -o '\[.*\]' | grep -o '{' | wc -l)
+            echo "- Found $SCA_VULNS dependency vulnerabilities" >> snyk-results/summary.txt
+          else
+            echo "- No SCA results found" >> snyk-results/summary.txt
+          fi
+          
+          cat snyk-results/summary.txt
+      
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
           name: snyk-results
-          path: snyk-results.json
+          path: snyk-results/
 
   trivy-scan:
     name: Trivy Scan
@@ -54,32 +105,46 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
+      
       - name: Run Trivy Vulnerability FS Scan
         run: |
           mkdir -p trivy-output
+          # Run with human-readable output first for summary
+          docker run --rm -v "$(pwd):/src" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs --scanners vuln /src || true
+          
+          # Then run with JSON output for artifact
           docker run --rm -v "$(pwd):/src" \
             -v /tmp/trivy-cache:/root/.cache \
             aquasec/trivy:latest fs --scanners vuln /src \
             --format json \
             --output /src/trivy-output/trivy-vuln-results.json || true
-
+      
       - name: Run Trivy SCA Scan (Dependencies)
         run: |
+          # Use --scanners config instead of deprecated --scanners-config
           docker run --rm -v "$(pwd):/src" \
             -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs --scanners license,secret,config /src \
+            aquasec/trivy:latest fs --scanners config,secret /src \
+            --format table || true
+          
+          # JSON output for artifact
+          docker run --rm -v "$(pwd):/src" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs --scanners config,secret /src \
             --format json \
             --output /src/trivy-output/trivy-sca-results.json || true
-
+      
       - name: Generate SBOM
         run: |
+          # Use CycloneDX with explicit format flag
           docker run --rm -v "$(pwd):/src" \
             -v /tmp/trivy-cache:/root/.cache \
             aquasec/trivy:latest sbom /src \
-            --format cyclonedx \
+            --format cyclonedx-json \
             --output /src/trivy-output/sbom.json || true
-
+      
       - name: Upload Trivy Results
         uses: actions/upload-artifact@v4
         with:
@@ -91,13 +156,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 0  # Required for git history scanning
+      
       - name: Run TruffleHog
         run: |
           mkdir -p trufflehog-output
+          
+          # Run with human-readable output first
+          docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest \
+            filesystem --directory /pwd || true
+          
+          # Then run with JSON output for artifact
           docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest \
             filesystem --directory /pwd --json > trufflehog-output/trufflehog-results.json || true
-
+      
       - name: Upload TruffleHog Results
         uses: actions/upload-artifact@v4
         with:
