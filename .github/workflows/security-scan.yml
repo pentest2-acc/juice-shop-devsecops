@@ -1,6 +1,6 @@
 # Fixed Code Security Scan Workflow
 
-```yaml
+
 name: Code Security Scan
 
 on:
@@ -254,4 +254,4 @@ jobs:
         with:
           name: trufflehog-results
           path: trufflehog-output/trufflehog-results.json
-```
+
