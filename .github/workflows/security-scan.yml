@@ -1,3 +1,6 @@
+# Fixed Code Security Scan Workflow
+
+```yaml
 name: Code Security Scan
 
 on:
@@ -43,49 +46,37 @@ jobs:
           # Run SAST scan with human-readable output
           echo "=== Running Snyk SAST Scan (Code Analysis) ==="
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-            snyk/snyk-cli:docker code test --all-projects || true
+            snyk/snyk-cli:docker code test . || true
           
           # Run SAST scan with JSON output for artifact
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-            snyk/snyk-cli:docker code test --all-projects --json-file-output=snyk-results/sast-results.json || true
-          
-          # Fallback to package.json if needed
-          if [ ! -f snyk-results/sast-results.json ] || [ ! -s snyk-results/sast-results.json ]; then
-            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-              snyk/snyk-cli:docker code test --file=package.json --json-file-output=snyk-results/sast-results.json || true
-          fi
+            snyk/snyk-cli:docker code test . --json-file-output=snyk-results/sast-results.json || true
       
       - name: Run Snyk SCA Scan (Dependencies)
         run: |
           # Run SCA scan with human-readable output
           echo "=== Running Snyk SCA Scan (Dependencies) ==="
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-            snyk/snyk-cli:docker test --all-projects || true
+            snyk/snyk-cli:docker test . --debug || true
           
           # Run SCA scan with JSON output for artifact
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-            snyk/snyk-cli:docker test --all-projects --json-file-output=snyk-results/sca-results.json || true
-          
-          # Fallback to package.json if needed
-          if [ ! -f snyk-results/sca-results.json ] || [ ! -s snyk-results/sca-results.json ]; then
-            docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN=${{ secrets.SNYK_TOKEN }} \
-              snyk/snyk-cli:docker test --file=package.json --json-file-output=snyk-results/sca-results.json || true
-          fi
+            snyk/snyk-cli:docker test . --json-file-output=snyk-results/sca-results.json || true
       
       - name: Generate Snyk Summary
         run: |
           echo "=== Snyk Scan Summary ===" > snyk-results/summary.txt
           echo "SAST Results:" >> snyk-results/summary.txt
-          if [ -f snyk-results/sast-results.json ]; then
-            SAST_VULNS=$(grep -o '"vulnerabilities":\s*\[[^\]]*\]' snyk-results/sast-results.json | grep -o '\[.*\]' | grep -o '{' | wc -l)
+          if [ -f snyk-results/sast-results.json ] && [ -s snyk-results/sast-results.json ]; then
+            SAST_VULNS=$(grep -o '"vulnerabilities":\s*\[[^\]]*\]' snyk-results/sast-results.json | grep -o '\[.*\]' | grep -o '{' | wc -l || echo "0")
             echo "- Found $SAST_VULNS code vulnerabilities" >> snyk-results/summary.txt
           else
             echo "- No SAST results found" >> snyk-results/summary.txt
           fi
           
           echo "SCA Results:" >> snyk-results/summary.txt
-          if [ -f snyk-results/sca-results.json ]; then
-            SCA_VULNS=$(grep -o '"vulnerabilities":\s*\[[^\]]*\]' snyk-results/sca-results.json | grep -o '\[.*\]' | grep -o '{' | wc -l)
+          if [ -f snyk-results/sca-results.json ] && [ -s snyk-results/sca-results.json ]; then
+            SCA_VULNS=$(grep -o '"vulnerabilities":\s*\[[^\]]*\]' snyk-results/sca-results.json | grep -o '\[.*\]' | grep -o '{' | wc -l || echo "0")
             echo "- Found $SCA_VULNS dependency vulnerabilities" >> snyk-results/summary.txt
           else
             echo "- No SCA results found" >> snyk-results/summary.txt
@@ -121,28 +112,28 @@ jobs:
             --format json \
             --output /src/trivy-output/trivy-vuln-results.json || true
       
-      - name: Run Trivy SCA Scan (Dependencies)
+      - name: Run Trivy Misconfig Scan
         run: |
-          # Use --scanners config instead of deprecated --scanners-config
+          # Using --scanners misconfig instead of config (which is deprecated)
           docker run --rm -v "$(pwd):/src" \
             -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs --scanners config,secret /src \
+            aquasec/trivy:latest fs --scanners misconfig,secret /src \
             --format table || true
           
           # JSON output for artifact
           docker run --rm -v "$(pwd):/src" \
             -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs --scanners config,secret /src \
+            aquasec/trivy:latest fs --scanners misconfig,secret /src \
             --format json \
-            --output /src/trivy-output/trivy-sca-results.json || true
+            --output /src/trivy-output/trivy-misconfig-results.json || true
       
       - name: Generate SBOM
         run: |
-          # Use CycloneDX with explicit format flag
+          # Use CycloneDX format (correct format flag)
           docker run --rm -v "$(pwd):/src" \
             -v /tmp/trivy-cache:/root/.cache \
             aquasec/trivy:latest sbom /src \
-            --format cyclonedx-json \
+            --format cyclonedx \
             --output /src/trivy-output/sbom.json || true
       
       - name: Upload Trivy Results
@@ -176,3 +167,4 @@ jobs:
         with:
           name: trufflehog-results
           path: trufflehog-output/trufflehog-results.json
+```
