@@ -49,7 +49,7 @@ jobs:
             -v "$(pwd):/project" \
             -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
             --entrypoint="" \
-            snyk/snyk-cli:latest \
+            snyk/snyk-cli \
             sh -c "
               snyk auth ${{ secrets.SNYK_TOKEN }} && \
               snyk code test --json-file-output=/project/snyk-results/snyk-results.json || true
