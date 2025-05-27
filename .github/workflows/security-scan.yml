@@ -120,8 +120,72 @@ jobs:
         with:
           name: snyk-results
           path: snyk-results/
+          
+snyk-SCA-scan:
+    name: Snyk SAST Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Create results directory
+        run: mkdir -p snyk-SCA-results
+        
+      - name: Debug Repository Contents
+        run: |
+          echo "=== Repository Debug Information ==="
+          echo "Current directory: $(pwd)"
+          echo "Repository contents:"
+          find . -type f -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" | head -20
+          echo "Total supported files found:"
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l
+          echo "Package files:"
+          find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod"
 
-  trivy-scan:
+      - name: Run Snyk SAST Scan (Similar to Jenkins)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          echo "=== Running Snyk SCA Code Scan (Jenkins Style) ==="
+          
+          # Check if we have supported files before running Snyk
+          SUPPORTED_FILES=$(find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l)
+          
+          if [ "$SUPPORTED_FILES" -eq 0 ]; then
+            echo "⚠️  No supported source code files found in repository"
+            echo "Snyk Code supports: JavaScript, TypeScript, Python, Java, PHP, Ruby, Go, C#, C/C++"
+            echo "Creating empty results file..."
+            echo '{"vulnerabilities":[],"summary":"No supported files found"}' > snyk-SCA-results/snyk-SCA-results.json
+          else
+            echo "✅ Found $SUPPORTED_FILES supported source code files"
+            
+            # Run Snyk using Docker (similar to Jenkins approach)
+            docker run --rm \
+              -v "$(pwd):/project" \
+              -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
+              --entrypoint="" \
+              snyk/snyk:linux \
+              sh -c "
+                cd /project && \
+                snyk auth ${{ secrets.SNYK_TOKEN }} && \
+                echo 'Current directory contents:' && \
+                ls -la && \
+                echo 'Running Snyk Code scan...' && \
+                snyk test --json-file-output=snyk-SCA-results/snyk-SCA-results.json || true
+              "
+            
+            # Check if results were generated
+            if [ -f snyk-SCA-results/snyk-SCA-results.json ]; then
+              echo "✅ Snyk SAST scan completed successfully"
+              echo "Results saved to snyk-SCA-results.json"
+          fi
+      
+      - name: Upload Snyk Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-SCA-results
+          path: snyk-SCA-results/
+          
+trivy-scan:
     name: Trivy Scan
     runs-on: ubuntu-latest
     timeout-minutes: 15
