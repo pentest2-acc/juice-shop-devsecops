@@ -49,7 +49,7 @@ jobs:
             -v "$(pwd):/project" \
             -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
             --entrypoint="" \
-            snyk/snyk-cli \
+            snyk/snyk:linux \
             sh -c "
               snyk auth ${{ secrets.SNYK_TOKEN }} && \
               snyk code test --json-file-output=/project/snyk-results/snyk-results.json || true
@@ -62,15 +62,24 @@ jobs:
             
             # Display summary of findings
             if [ -s snyk-results/snyk-results.json ]; then
-              ISSUE_COUNT=$(jq '.runs[0].results | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
-              echo "Found $ISSUE_COUNT code vulnerabilities"
+              # Count vulnerabilities from Snyk JSON output
+              VULN_COUNT=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/snyk-results.json 2>/dev/null || echo "0")
+              echo "Found $VULN_COUNT code vulnerabilities"
+              
+              # Show severity breakdown if vulnerabilities exist
+              if [ "$VULN_COUNT" != "0" ]; then
+                HIGH_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
+                MEDIUM_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
+                LOW_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
+                echo "Severity breakdown: High: $HIGH_COUNT, Medium: $MEDIUM_COUNT, Low: $LOW_COUNT"
+              fi
             else
               echo "No vulnerabilities found in code scan"
             fi
           else
             echo "❌ Snyk scan failed to generate results"
             # Create empty results file for consistency
-            echo '{"runs":[{"results":[]}]}' > snyk-results/snyk-results.json
+            echo '{"vulnerabilities":[]}' > snyk-results/snyk-results.json
           fi
       
       - name: Upload Snyk Results
