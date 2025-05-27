@@ -15,14 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Run Semgrep Scan
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan \
             --config auto \
             --error \
             --json > semgrep-results.json || true
-      
+
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
@@ -34,16 +34,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Create results directory
         run: mkdir -p snyk-results
-        
+
       - name: Debug Repository Contents
         run: |
           echo "=== Repository Debug Information ==="
           echo "Current directory: $(pwd)"
           echo "Repository contents:"
-          find . -type f -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" | head -20
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" \) | head -20
           echo "Total supported files found:"
           find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l
           echo "Package files:"
@@ -53,7 +53,6 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          echo "=== Running Snyk SAST Code Scan (Jenkins Style) ==="
           SUPPORTED_FILES=$(find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l)
 
           if [ "$SUPPORTED_FILES" -eq 0 ]; then
@@ -67,7 +66,7 @@ jobs:
               snyk/snyk:linux \
               sh -c "
                 cd /project && \
-                snyk auth ${{ secrets.SNYK_TOKEN }} && \
+                snyk auth $SNYK_TOKEN && \
                 snyk code test --json-file-output=snyk-results/snyk-results.json || true
               "
 
@@ -111,6 +110,17 @@ jobs:
           echo "Package files:"
           find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          fi
+
       - name: Run Snyk SCA Scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -127,7 +137,7 @@ jobs:
               snyk/snyk:linux \
               sh -c "
                 cd /project && \
-                snyk auth ${{ secrets.SNYK_TOKEN }} && \
+                snyk auth $SNYK_TOKEN && \
                 snyk test --json-file-output=snyk-SCA-results/snyk-SCA-results.json || true
               "
           fi
@@ -144,7 +154,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Run Trivy Vulnerability FS Scan
         run: |
           mkdir -p trivy-output
@@ -213,7 +223,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Run TruffleHog
         run: |
           mkdir -p trufflehog-output
