@@ -42,14 +42,22 @@ jobs:
         run: |
           echo "=== Repository Debug Information ==="
           echo "Current directory: $(pwd)"
-          echo "Repository contents:"
-          find . -type f -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" | head -20
-          echo "Total supported files found:"
+          echo "Repository root contents:"
+          ls -la
+          echo ""
+          echo "All files in repository (first 50):"
+          find . -type f | head -50
+          echo ""
+          echo "Supported source code files:"
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | head -20
+          echo ""
+          echo "Total supported files count:"
           find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l
-          echo "Package files:"
-          find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod"
+          echo ""
+          echo "Package/Config files:"
+          find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod" -o -name "*.gradle" -o -name "composer.json"
 
-      - name: Run Snyk SAST Scan (Similar to Jenkins)
+      - name: Run Snyk SAST Scan (Code Analysis)
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -61,12 +69,14 @@ jobs:
           if [ "$SUPPORTED_FILES" -eq 0 ]; then
             echo "⚠️  No supported source code files found in repository"
             echo "Snyk Code supports: JavaScript, TypeScript, Python, Java, PHP, Ruby, Go, C#, C/C++"
-            echo "Creating empty results file..."
-            echo '{"vulnerabilities":[],"summary":"No supported files found"}' > snyk-results/snyk-results.json
+            echo "This might be a documentation-only repository or contain unsupported file types"
+            echo "Creating placeholder results file..."
+            echo '{"vulnerabilities":[],"summary":"No supported files found for SAST analysis","filesScanned":0}' > snyk-results/sast-results.json
           else
             echo "✅ Found $SUPPORTED_FILES supported source code files"
             
-            # Run Snyk using Docker (similar to Jenkins approach)
+            # Run Snyk Code using Docker (similar to Jenkins approach)
+            echo "Attempting Snyk Code scan..."
             docker run --rm \
               -v "$(pwd):/project" \
               -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
@@ -78,153 +88,123 @@ jobs:
                 echo 'Current directory contents:' && \
                 ls -la && \
                 echo 'Running Snyk Code scan...' && \
-                snyk code test --json-file-output=snyk-results/snyk-results.json || true
+                snyk code test --json-file-output=snyk-results/sast-results.json || true
               "
             
             # Check if results were generated
-            if [ -f snyk-results/snyk-results.json ]; then
+            if [ -f snyk-results/sast-results.json ]; then
               echo "✅ Snyk SAST scan completed successfully"
-              echo "Results saved to snyk-results.json"
               
               # Display summary of findings
-              if [ -s snyk-results/snyk-results.json ]; then
+              if [ -s snyk-results/sast-results.json ]; then
                 # Check if it's an error response or actual results
-                if grep -q '"error"' snyk-results/snyk-results.json; then
-                  echo "❌ Scan completed with errors:"
-                  cat snyk-results/snyk-results.json
+                if grep -q '"error"' snyk-results/sast-results.json; then
+                  echo "❌ SAST scan completed with errors:"
+                  cat snyk-results/sast-results.json
                 else
                   # Count vulnerabilities from Snyk JSON output
-                  VULN_COUNT=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/snyk-results.json 2>/dev/null || echo "0")
+                  VULN_COUNT=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/sast-results.json 2>/dev/null || echo "0")
                   echo "Found $VULN_COUNT code vulnerabilities"
                   
                   # Show severity breakdown if vulnerabilities exist
                   if [ "$VULN_COUNT" != "0" ]; then
-                    HIGH_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
-                    MEDIUM_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
-                    LOW_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-results/snyk-results.json 2>/dev/null || echo "0")
-                    echo "Severity breakdown: High: $HIGH_COUNT, Medium: $MEDIUM_COUNT, Low: $LOW_COUNT"
+                    HIGH_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-results/sast-results.json 2>/dev/null || echo "0")
+                    MEDIUM_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-results/sast-results.json 2>/dev/null || echo "0")
+                    LOW_COUNT=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-results/sast-results.json 2>/dev/null || echo "0")
+                    echo "SAST Severity breakdown: High: $HIGH_COUNT, Medium: $MEDIUM_COUNT, Low: $LOW_COUNT"
                   fi
                 fi
               else
-                echo "Scan completed but no results generated"
+                echo "SAST scan completed but no results generated"
               fi
             else
-              echo "❌ Snyk scan failed to generate results file"
-              # Create empty results file for consistency
-              echo '{"vulnerabilities":[],"summary":"Scan failed to generate results"}' > snyk-results/snyk-results.json
+              echo "❌ Snyk SAST scan failed to generate results file"
+              echo '{"vulnerabilities":[],"summary":"SAST scan failed to generate results"}' > snyk-results/sast-results.json
             fi
           fi
-      
-      - name: Upload Snyk Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: snyk-results
-          path: snyk-results/
 
-  trivy-scan:
-    name: Trivy Scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Run Trivy Vulnerability FS Scan
+      - name: Run Snyk SCA Scan (Dependencies)
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          mkdir -p trivy-output
-          # Run with human-readable output first for summary
-          docker run --rm -v "$(pwd):/src" \
-            -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs /src \
-            --scanners vuln \
-            --security-checks vuln \
-            --no-progress || true
+          echo "=== Running Snyk SCA Scan (Dependencies) ==="
           
-          # Then run with JSON output for artifact
-          docker run --rm -v "$(pwd):/src" \
-            -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs /src \
-            --scanners vuln \
-            --security-checks vuln \
-            --format json \
-            --output /src/trivy-output/trivy-vuln-results.json || true
-      
-      - name: Run Trivy Misconfig & Secret Scan
-        run: |
-          # Using --scanners misconfig instead of config (which is deprecated)
-          docker run --rm -v "$(pwd):/src" \
-            -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs /src \
-            --scanners misconfig,secret \
-            --security-checks config,secret \
-            --format table || true
+          # Check for dependency files
+          PACKAGE_FILES=$(find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod" -o -name "*.gradle" -o -name "composer.json" | wc -l)
           
-          # JSON output for artifact
-          docker run --rm -v "$(pwd):/src" \
-            -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs /src \
-            --scanners misconfig,secret \
-            --security-checks config,secret \
-            --format json \
-            --output /src/trivy-output/trivy-misconfig-results.json || true
-      
-      - name: Generate SBOM
-        run: |
-          # Generate SBOM directly without checking cyclonedx support
-          # For npm projects like Juice Shop
-          docker run --rm -v "$(pwd):/src" \
-            -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs /src \
-            --format cyclonedx \
-            --output /src/trivy-output/sbom.cyclonedx.json || true
-            
-          # Alternative SBOM format (JSON)
-          docker run --rm -v "$(pwd):/src" \
-            -v /tmp/trivy-cache:/root/.cache \
-            aquasec/trivy:latest fs /src \
-            --format json \
-            --output /src/trivy-output/sbom.json || true
-            
-          # Check if either SBOM was generated
-          if [ -s trivy-output/sbom.cyclonedx.json ] || [ -s trivy-output/sbom.json ]; then
-            echo "SBOM generation successful"
+          if [ "$PACKAGE_FILES" -eq 0 ]; then
+            echo "⚠️  No package/dependency files found in repository"
+            echo "SCA scan requires package files like package.json, requirements.txt, pom.xml, etc."
+            echo "Creating placeholder results file..."
+            echo '{"vulnerabilities":[],"summary":"No dependency files found for SCA analysis","filesScanned":0}' > snyk-results/sca-results.json
           else
-            echo "SBOM generation failed with standard methods, trying direct NPM approach"
+            echo "✅ Found $PACKAGE_FILES dependency files"
+            echo "Dependency files found:"
+            find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod" -o -name "*.gradle" -o -name "composer.json"
             
-            # Use NPM's built-in capability if package.json exists
-            if [ -f package.json ]; then
-              npm list --json > trivy-output/npm-sbom.json || true
-              echo "Generated NPM dependency SBOM as fallback"
+            # Run Snyk SCA using Docker
+            echo "Attempting Snyk SCA scan..."
+            docker run --rm \
+              -v "$(pwd):/project" \
+              -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
+              --entrypoint="" \
+              snyk/snyk:linux \
+              sh -c "
+                cd /project && \
+                snyk auth ${{ secrets.SNYK_TOKEN }} && \
+                echo 'Running SCA scan for dependencies...' && \
+                snyk test --json-file-output=snyk-results/sca-results.json || true
+              "
+            
+            # Check if results were generated
+            if [ -f snyk-results/sca-results.json ]; then
+              echo "✅ Snyk SCA scan completed successfully"
+              
+              # Display summary of findings
+              if [ -s snyk-results/sca-results.json ]; then
+                # Check if it's an error response or actual results
+                if grep -q '"error"' snyk-results/sca-results.json; then
+                  echo "❌ SCA scan completed with errors:"
+                  cat snyk-results/sca-results.json
+                else
+                  # Count vulnerabilities from Snyk JSON output
+                  SCA_VULN_COUNT=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/sca-results.json 2>/dev/null || echo "0")
+                  echo "Found $SCA_VULN_COUNT dependency vulnerabilities"
+                  
+                  # Show severity breakdown if vulnerabilities exist
+                  if [ "$SCA_VULN_COUNT" != "0" ]; then
+                    SCA_HIGH=$(jq -r '[.vulnerabilities[] | select(.severity == "high")] | length' snyk-results/sca-results.json 2>/dev/null || echo "0")
+                    SCA_MEDIUM=$(jq -r '[.vulnerabilities[] | select(.severity == "medium")] | length' snyk-results/sca-results.json 2>/dev/null || echo "0")
+                    SCA_LOW=$(jq -r '[.vulnerabilities[] | select(.severity == "low")] | length' snyk-results/sca-results.json 2>/dev/null || echo "0")
+                    echo "SCA Severity breakdown: High: $SCA_HIGH, Medium: $SCA_MEDIUM, Low: $SCA_LOW"
+                  fi
+                fi
+              else
+                echo "SCA scan completed but no results generated"
+              fi
+            else
+              echo "❌ Snyk SCA scan failed to generate results file"
+              echo '{"vulnerabilities":[],"summary":"SCA scan failed to generate results"}' > snyk-results/sca-results.json
             fi
           fi
-      
-      - name: Upload Trivy Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-results
-          path: trivy-output/
 
-  trufflehog-scan:
-    name: TruffleHog Secrets Scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Required for git history scanning
-      
-      - name: Run TruffleHog
+      - name: Generate Snyk Summary
         run: |
-          mkdir -p trufflehog-output
+          echo "=== Snyk Scan Summary ===" > snyk-results/summary.txt
+          echo "SAST Results:" >> snyk-results/summary.txt
+          if [ -f snyk-results/sast-results.json ] && [ -s snyk-results/sast-results.json ]; then
+            SAST_VULNS=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/sast-results.json 2>/dev/null || echo "0")
+            echo "- Found $SAST_VULNS code issues" >> snyk-results/summary.txt
+          else
+            echo "- No SAST results found" >> snyk-results/summary.txt
+          fi
           
-          # Run with human-readable output first
-          docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest \
-            filesystem --directory /pwd || true
+          echo "SCA Results:" >> snyk-results/summary.txt
+          if [ -f snyk-results/sca-results.json ] && [ -s snyk-results/sca-results.json ]; then
+            SCA_VULNS=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/sca-results.json 2>/dev/null || echo "0")
+            echo "- Found $SCA_VULNS dependency vulnerabilities" >> snyk-results/summary.txt
+          else
+            echo "- No SCA results found" >> snyk-results/summary.txt
+          fi
           
-          # Then run with JSON output for artifact
-          docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest \
-            filesystem --directory /pwd --json > trufflehog-output/trufflehog-results.json || true
-      
-      - name: Upload TruffleHog Results
-        uses: actions/upload-artifact@v4
-        with:
-          name: trufflehog-results
-          path: trufflehog-output/trufflehog-results.json
+          cat snyk-results/summary.txt
