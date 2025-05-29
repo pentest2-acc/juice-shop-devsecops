@@ -65,20 +65,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
       - name: Create results directory
         run: mkdir -p snyk-sca-results
       - name: Run Snyk SCA Scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          # MODIFIED: Added 'npm install' to ensure dependencies are available before scanning.
-          # This resolves the "Failed to get dependencies" error.
+          if [ -f package.json ]; then npm install; fi
           docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
             --entrypoint="" snyk/snyk:linux sh -c "
               set -e
               cd /project
               snyk auth $SNYK_TOKEN
-              if [ -f package.json ]; then npm install; fi
               snyk test --all-projects --json-file-output=snyk-sca-results/snyk-sca.json --sarif-file-output=snyk-sca-results/snyk-sca.sarif || true
             "
       - name: Upload Snyk SCA SARIF to Security Tab
@@ -91,6 +93,7 @@ jobs:
         with:
           name: snyk-sca-results-json
           path: snyk-sca-results/snyk-sca.json
+
 
   trivy-scans:
     name: Trivy (SCA, Misconfig, Secret, SBOM)
