@@ -1,121 +1,4 @@
-owasp-zap-dast:
-    name: OWASP ZAP (DAST)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Start the application in the background
-        run: |
-          echo "Starting the program"
-          # IMPORTANT: Replace this with the command that starts your web application.
-          # For example: python app.py & or npm start &
-          
-          # For demonstration, we'll create a simple HTTP server
-          python -m http.server 8080 &
-          echo $! > app.pid
-          echo "Application started with PID: $(cat app.pid)"
-      - name: Wait for application to be ready
-        run: |
-          echo "Waiting for application to start..."
-          sleep 10
-          # Test application availability
-          for i in {1..5}; do
-            if curl -f http://127.0.0.1:8080 >/dev/null 2>&1; then
-              echo "✅ Application is ready"
-              break
-            else
-              echo "⏳ Waiting for application... (attempt $i/5)"
-              sleep 5
-            fi
-          done
-      - name: Run ZAP Baseline Scan
-        run: |
-          echo "🔍 Starting OWASP ZAP Baseline Scan..."
-          mkdir -p zap-output
-          
-          # Run ZAP baseline scan using Docker
-          docker run -v $(pwd)/zap-output:/zap/wrk/:rw \
-            --network="host" \
-            -t ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
-            -t http://127.0.0.1:8080 \
-            -J zap-report.json \
-            -r zap-report.html \
-            -x zap-report.xml \
-            -w zap-report.md \
-            -a \
-            -j \
-            -l WARN || true
-          
-          echo "✅ ZAP scan completed"
-          
-          # List generated files
-          echo "Generated ZAP files:"
-          ls -la zap-output/
-      - name: Process ZAP Results and Create SARIF
-        run: |
-          cat > zap_to_sarif.py << 'EOF'
-          import json
-          import xml.etree.ElementTree as ET
-          import os
-          from datetime import datetime
-
-          def xml_to_sarif(xml_file, sarif_file):
-              if not os.path.exists(xml_file):
-                  print(f"XML file {xml_file} not found, creating empty SARIF")
-                  create_empty_sarif(sarif_file)
-                  return
-
-              try:
-                  tree = ET.parse(xml_file)
-                  root = tree.getroot()
-                  
-                  sarif_results = []
-                  rules = {}
-                  
-                  # Parse ZAP XML report
-                  for site in root.findall('.//site'):
-                      site_name = site.get('name', 'Unknown')
-                      
-                      for alert in site.findall('.//alertitem'):
-                          plugin_id = alert.find('pluginid')
-                          alert_name = alert.find('name')
-                          risk_desc = alert.find('riskdesc')
-                          desc = alert.find('desc')
-                          uri = alert.find('uri')
-                          
-                          if plugin_id is not None and alert_name is not None:
-                              rule_id = f"zap-{plugin_id.text}"
-                              
-                              # Extract risk level
-                              risk_level = "warning"
-                              if risk_desc is not None:
-                                  risk_text = risk_desc.text.lower() if risk_desc.text else ""
-                                  if "high" in risk_text:
-                                      risk_level = "error"
-                                  elif "medium" in risk_text:
-                                      risk_level = "warning"
-                                  elif "low" in risk_text:
-                                      risk_level = "note"
-                              
-                              # Add rule if not exists
-                              if rule_id not in rules:
-                                  rules[rule_id] = {
-                                      "id": rule_id,
-                                      "name": alert_name.text if alert_name.text else "Unknown Alert",
-                                      "shortDescription": {
-                                          "text": alert_name.text if alert_name.text else "Security Alert"
-                                      },
-                                      "fullDescription": {
-                                          "text": desc.text if desc and desc.text else "OWASP ZAP detected a security issue"
-                                      },
-                                      "defaultConfiguration": {
-                                          "level": riskname: Comprehensive Code Security Scan
+name: Comprehensive Code Security Scan
 
 on:
   push:
@@ -216,114 +99,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Setup Node.js (for package.json processing)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-      - name: Install dependencies (for better SBOM generation)
+      - name: Create Trivy output directory
+        run: mkdir -p trivy-output
+      - name: Run Trivy Scans
         run: |
-          if [ -f package.json ]; then npm install; fi
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Debug Repository Structure
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners vuln --format json --output /ws/trivy-output/vuln.json || true
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners vuln --format sarif --output /ws/trivy-output/vuln.sarif || true
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners secret --format json --output /ws/trivy-output/secrets.json || true
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners secret --format sarif --output /ws/trivy-output/secrets.sarif || true
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners misconfig --format json --output /ws/trivy-output/misconfig.json || true
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners misconfig --format sarif --output /ws/trivy-output/misconfig.sarif || true
+      - name: Generate SBOM with Trivy
         run: |
-          echo "=== Repository Structure ==="
-          find . -type f -name "*.json" -o -name "*.txt" -o -name "*.yml" -o -name "*.yaml" | head -20
-          echo "=== Package Files ==="
-          ls -la package*.json requirements*.txt go.mod Cargo.toml composer.json 2>/dev/null || echo "No package files found"
-      - name: Run Trivy Vulnerability Scan (Fixed)
-        run: |
-          mkdir -p trivy-output
-          echo "🔍 Running Trivy Vulnerability Scan..."
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --scanners vuln \
-            --format json \
-            --output /ws/trivy-output/vuln.json \
-            --severity HIGH,CRITICAL || true
-          
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --scanners vuln \
-            --format sarif \
-            --output /ws/trivy-output/vuln.sarif \
-            --severity HIGH,CRITICAL || true
-            
-          echo "✅ Vulnerability scan completed"
-      - name: Run Trivy Secret Scan (Enhanced)
-        run: |
-          echo "🔍 Running Trivy Secret Scan..."
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --scanners secret \
-            --format json \
-            --output /ws/trivy-output/secrets.json || true
-          
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --scanners secret \
-            --format sarif \
-            --output /ws/trivy-output/secrets.sarif || true
-            
-          echo "✅ Secret scan completed"
-      - name: Run Trivy Misconfiguration Scan
-        run: |
-          echo "🔍 Running Trivy Misconfiguration Scan..."
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --scanners misconfig \
-            --format json \
-            --output /ws/trivy-output/misconfig.json || true
-          
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --scanners misconfig \
-            --format sarif \
-            --output /ws/trivy-output/misconfig.sarif || true
-            
-          echo "✅ Misconfiguration scan completed"
-      - name: Generate Enhanced SBOM
-        run: |
-          echo "📋 Generating Enhanced SBOM..."
-          # Generate CycloneDX SBOM
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --format cyclonedx \
-            --output /ws/trivy-output/sbom.cyclonedx.json || true
-          
-          # Generate SPDX SBOM
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws \
-            --format spdx-json \
-            --output /ws/trivy-output/sbom.spdx.json || true
-            
-          echo "✅ SBOM generation completed"
-      - name: Create Comprehensive Security Summary
-        run: |
-          cat > trivy-output/security_summary.sh << 'EOF'
-          #!/bin/bash
-          echo "=== Security Scan Summary ==="
-          echo "=== TRIVY SECURITY SCAN RESULTS ==="
-          
-          # Count vulnerabilities
-          if [ -f "vuln.json" ]; then
-            VULN_COUNT=$(jq -r '.Results[]?.Vulnerabilities // [] | length' vuln.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-            echo "🔴 Vulnerabilities: $VULN_COUNT"
-          else
-            echo "🔴 Vulnerabilities: 0"
-          fi
-          
-          # Count secrets
-          if [ -f "secrets.json" ]; then
-            SECRET_COUNT=$(jq -r '.Results[]?.Secrets // [] | length' secrets.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-            echo "🔑 Secrets: $SECRET_COUNT"
-          else
-            echo "🔑 Secrets: 0"
-          fi
-          
-          # Count misconfigurations
-          if [ -f "misconfig.json" ]; then
-            MISCONFIG_COUNT=$(jq -r '.Results[]?.Misconfigurations // [] | length' misconfig.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-            echo "⚙️ Misconfigurations: $MISCONFIG_COUNT"
-          else
-            echo "⚙️ Misconfigurations: 0"
-          fi
-          EOF
-          
-          cd trivy-output
-          chmod +x security_summary.sh
-          ./security_summary.sh
+          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --format cyclonedx --output /ws/trivy-output/sbom.cyclonedx.json || true
       - name: Upload Trivy Vulnerability SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
@@ -342,7 +130,7 @@ jobs:
           sarif_file: trivy-output/misconfig.sarif
           category: trivy-misconfig
         if: always()
-      - name: Upload Trivy Results
+      - name: Upload All Trivy Results as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: trivy-results
@@ -358,57 +146,8 @@ jobs:
         run: mkdir -p trufflehog-output
       - name: Run TruffleHog Scan
         run: |
-          echo "🔍 TruffleHog: Unearth your secrets. 🔍🔑"
-          echo "=== TruffleHog Scan Starting ==="
-          
           # Run TruffleHog with JSON output
           docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest filesystem --directory /pwd --json > trufflehog-output/results.json || true
-          
-          echo "=== TruffleHog Scan Completed ==="
-          
-          # Display findings summary
-          if [ -s trufflehog-output/results.json ]; then
-            echo "Found unverified result 🔍🔑❓"
-            echo "Processing TruffleHog results..."
-            
-            # Count findings by detector type
-            python3 -c "
-          import json, sys
-          try:
-              with open('trufflehog-output/results.json', 'r') as f:
-                  findings = []
-                  for line in f:
-                      if line.strip():
-                          try:
-                              findings.append(json.loads(line))
-                          except:
-                              continue
-              
-              detectors = {}
-              verified_count = 0
-              total_count = len(findings)
-              
-              for finding in findings:
-                  detector = finding.get('DetectorName', 'Unknown')
-                  verified = finding.get('Verified', False)
-                  if verified:
-                      verified_count += 1
-                  detectors[detector] = detectors.get(detector, 0) + 1
-              
-              print(f'Total findings: {total_count}')
-              print(f'Verified secrets: {verified_count}')
-              print(f'Unverified secrets: {total_count - verified_count}')
-              
-              if detectors:
-                  print('Detector breakdown:')
-                  for detector, count in sorted(detectors.items()):
-                      print(f'  {detector}: {count}')
-          except Exception as e:
-              print('Error processing results:', str(e))
-          "
-          else
-            echo "No secrets found or scan failed"
-          fi
       - name: Setup Python for SARIF conversion
         uses: actions/setup-python@v5
         with:
@@ -419,7 +158,6 @@ jobs:
           import json
           import sys
           from datetime import datetime
-          import os
 
           def convert_trufflehog_to_sarif(json_file, sarif_file):
               try:
@@ -440,7 +178,6 @@ jobs:
                   trufflehog_results = []
 
               sarif_results = []
-              rules = {}
               
               for finding in trufflehog_results:
                   if not finding:
@@ -453,44 +190,15 @@ jobs:
                   source_metadata = finding.get('SourceMetadata', {})
                   
                   # Get file information
-                  data = source_metadata.get('Data', {})
-                  filesystem_data = data.get('Filesystem', {}) if data else {}
-                  file_path = filesystem_data.get('file', 'Unknown')
-                  line_number = filesystem_data.get('line', 1)
-                  
-                  # Clean up file path
-                  if file_path.startswith('/pwd/'):
-                      file_path = file_path[5:]  # Remove /pwd/ prefix
-                  
-                  rule_id = f"trufflehog-{detector_name.lower().replace(' ', '-')}"
-                  
-                  # Add rule definition
-                  if rule_id not in rules:
-                      rules[rule_id] = {
-                          "id": rule_id,
-                          "name": f"{detector_name} Secret Detection",
-                          "shortDescription": {
-                              "text": f"Potential {detector_name} secret detected"
-                          },
-                          "fullDescription": {
-                              "text": f"TruffleHog detected a potential {detector_name} secret or credential in the codebase"
-                          },
-                          "defaultConfiguration": {
-                              "level": "error" if verified else "warning"
-                          },
-                          "helpUri": "https://github.com/trufflesecurity/trufflehog",
-                          "properties": {
-                              "tags": ["security", "secret", detector_type.lower()],
-                              "precision": "high" if verified else "medium"
-                          }
-                      }
+                  file_path = source_metadata.get('Data', {}).get('Filesystem', {}).get('file', 'Unknown')
+                  line_number = source_metadata.get('Data', {}).get('Filesystem', {}).get('line', 1)
                   
                   # Create SARIF result
                   sarif_result = {
-                      "ruleId": rule_id,
-                      "ruleIndex": list(rules.keys()).index(rule_id),
+                      "ruleId": f"trufflehog-{detector_name.lower()}",
+                      "ruleIndex": 0,
                       "message": {
-                          "text": f"Potential {detector_name} secret detected{' (verified)' if verified else ' (unverified)'}"
+                          "text": f"Potential {detector_name} secret detected{' (verified)' if verified else ''}"
                       },
                       "level": "error" if verified else "warning",
                       "locations": [
@@ -509,7 +217,7 @@ jobs:
                       "properties": {
                           "detectorType": detector_type,
                           "verified": verified,
-                          "detectorName": detector_name
+                          "raw": finding.get('Raw', '')[:100] + '...' if len(finding.get('Raw', '')) > 100 else finding.get('Raw', '')
                       }
                   }
                   sarif_results.append(sarif_result)
@@ -523,9 +231,24 @@ jobs:
                           "tool": {
                               "driver": {
                                   "name": "TruffleHog",
-                                  "version": "3.88.34",
+                                  "version": "3.0.0",
                                   "informationUri": "https://github.com/trufflesecurity/trufflehog",
-                                  "rules": list(rules.values())
+                                  "rules": [
+                                      {
+                                          "id": "trufflehog-secret",
+                                          "name": "Secret Detection",
+                                          "shortDescription": {
+                                              "text": "Potential secret or credential detected"
+                                          },
+                                          "fullDescription": {
+                                              "text": "TruffleHog detected a potential secret or credential in the codebase"
+                                          },
+                                          "defaultConfiguration": {
+                                              "level": "error"
+                                          },
+                                          "helpUri": "https://github.com/trufflesecurity/trufflehog"
+                                      }
+                                  ]
                               }
                           },
                           "results": sarif_results,
@@ -536,57 +259,13 @@ jobs:
 
               with open(sarif_file, 'w') as f:
                   json.dump(sarif_document, f, indent=2)
-              
-              return len(sarif_results)
 
           if __name__ == "__main__":
-              result_count = convert_trufflehog_to_sarif('trufflehog-output/results.json', 'trufflehog-output/results.sarif')
-              print(f"TruffleHog found {result_count} potential secrets")
-              print("Converted TruffleHog results to SARIF format")
+              convert_trufflehog_to_sarif('trufflehog-output/results.json', 'trufflehog-output/results.sarif')
+              print(f"Converted TruffleHog results to SARIF format")
           EOF
           
           python convert_to_sarif.py
-      - name: Display TruffleHog Summary
-        run: |
-          echo "=== TruffleHog Summary ==="
-          if [ -s trufflehog-output/results.json ]; then
-            # Create detailed summary
-            python3 -c "
-          import json
-          findings = []
-          try:
-              with open('trufflehog-output/results.json', 'r') as f:
-                  for line in f:
-                      if line.strip():
-                          try:
-                              findings.append(json.loads(line))
-                          except:
-                              continue
-          except:
-              pass
-          
-          if findings:
-              print('=== DETAILED FINDINGS ===')
-              for i, finding in enumerate(findings[:5], 1):  # Show first 5 findings
-                  detector = finding.get('DetectorName', 'Unknown')
-                  verified = '✅ VERIFIED' if finding.get('Verified') else '❓ UNVERIFIED'
-                  file_info = finding.get('SourceMetadata', {}).get('Data', {}).get('Filesystem', {})
-                  file_path = file_info.get('file', 'Unknown').replace('/pwd/', '')
-                  line_num = file_info.get('line', 'Unknown')
-                  
-                  print(f'{i}. {detector} - {verified}')
-                  print(f'   File: {file_path}')
-                  print(f'   Line: {line_num}')
-                  print()
-              
-              if len(findings) > 5:
-                  print(f'... and {len(findings) - 5} more findings')
-          else:
-              print('No secrets detected')
-          "
-          else
-            echo "No TruffleHog results to display"
-          fi
       - name: Upload TruffleHog SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
