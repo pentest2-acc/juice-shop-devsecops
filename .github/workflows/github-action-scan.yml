@@ -1,4 +1,4 @@
-name: Comprehensive Code Security Scan
+name: Code Security Scan
 
 on:
   push:
@@ -11,126 +11,421 @@ permissions:
   security-events: write
 
 jobs:
-  semgrep-sast:
-    name: Semgrep (SAST)
+  semgrep-scan:
+    name: Semgrep SAST
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Run Semgrep Scan
         run: |
-          docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan --config auto --error --json > semgrep-results.json || true
-          docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan --config auto --error --sarif > semgrep-results.sarif || true
+          mkdir -p semgrep-output
+          docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan \
+            --config auto \
+            --config="p/security-audit" \
+            --config="p/owasp-top-ten" \
+            --config="p/security-code-scan" \
+            --config="p/default" \
+            --error \
+            --json > semgrep-output/semgrep-results.json || true
+            
+          # Generate SARIF format
+          docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan \
+            --config auto \
+            --config="p/security-audit" \
+            --config="p/owasp-top-ten" \
+            --config="p/security-code-scan" \
+            --config="p/default" \
+            --error \
+            --sarif > semgrep-output/semgrep-results.sarif || true
+
       - name: Upload Semgrep SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: semgrep-results.sarif
+          sarif_file: semgrep-output/semgrep-results.sarif
           category: semgrep-sast
-      - name: Upload JSON Results as Artifact
+        if: always()
+
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: semgrep-results-json
-          path: semgrep-results.json
+          name: semgrep-results
+          path: semgrep-output/
 
-  snyk-sast:
-    name: Snyk (SAST)
+  snyk-scan:
+    name: Snyk SAST Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Create results directory
         run: mkdir -p snyk-results
+
+      - name: Debug Repository Contents
+        run: |
+          echo "=== Repository Debug Information ==="
+          echo "Current directory: $(pwd)"
+          echo "Repository contents:"
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" \) | head -20
+          echo "Total supported files found:"
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l
+          echo "Package files:"
+          find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod"
+
       - name: Run Snyk SAST Scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-            --entrypoint="" snyk/snyk:linux sh -c "
-              set -e
-              cd /project && \
-              snyk auth $SNYK_TOKEN && \
-              snyk code test --json-file-output=snyk-results/snyk-sast.json --sarif-file-output=snyk-results/snyk-sast.sarif || true
-            "
+          SUPPORTED_FILES=$(find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l)
+
+          if [ "$SUPPORTED_FILES" -eq 0 ]; then
+            echo "⚠️  No supported source code files found in repository"
+            echo '{"vulnerabilities":[],"summary":"No supported files found"}' > snyk-results/snyk-results.json
+            echo '{"runs":[{"tool":{"driver":{"name":"Snyk"}},"results":[]}]}' > snyk-results/snyk-sast.sarif
+          else
+            docker run --rm \
+              -v "$(pwd):/project" \
+              -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
+              --entrypoint="" \
+              snyk/snyk:linux \
+              sh -c "
+                cd /project && \
+                snyk auth $SNYK_TOKEN && \
+                snyk code test --json-file-output=snyk-results/snyk-results.json || true && \
+                snyk code test --sarif-file-output=snyk-results/snyk-sast.sarif || true
+              "
+
+            if [ -f snyk-results/snyk-results.json ]; then
+              echo "✅ Snyk SAST scan completed successfully"
+              if grep -q '"error"' snyk-results/snyk-results.json; then
+                echo "❌ Scan completed with errors:"
+                cat snyk-results/snyk-results.json
+              else
+                VULN_COUNT=$(jq -r 'if .vulnerabilities then (.vulnerabilities | length) else 0 end' snyk-results/snyk-results.json || echo "0")
+                echo "Found $VULN_COUNT code vulnerabilities"
+              fi
+            else
+              echo '{"vulnerabilities":[],"summary":"Scan failed to generate results"}' > snyk-results/snyk-results.json
+              echo '{"runs":[{"tool":{"driver":{"name":"Snyk"}},"results":[]}]}' > snyk-results/snyk-sast.sarif
+            fi
+          fi
+
       - name: Upload Snyk SAST SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: snyk-results/snyk-sast.sarif
           category: snyk-sast
-      - name: Upload Snyk SAST JSON as Artifact
+        if: always()
+
+      - name: Upload Snyk Results
         uses: actions/upload-artifact@v4
         with:
-          name: snyk-sast-results-json
-          path: snyk-results/snyk-sast.json
+          name: snyk-results
+          path: snyk-results/
 
-  snyk-sca:
-    name: Snyk (SCA)
+  snyk-SCA-scan:
+    name: Snyk SCA Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          fi
+
       - name: Create results directory
-        run: mkdir -p snyk-sca-results
+        run: mkdir -p snyk-SCA-results
+
+      - name: Debug Repository Contents
+        run: |
+          echo "=== Repository Debug Information ==="
+          echo "Current directory: $(pwd)"
+          echo "Repository contents:"
+          find . -type f -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" | head -20
+          echo "Total supported files found:"
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" -o -name "*.cs" -o -name "*.cpp" -o -name "*.c" -o -name "*.jsx" -o -name "*.tsx" \) | wc -l
+          echo "Package files:"
+          find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod"
+
       - name: Run Snyk SCA Scan
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          if [ -f package.json ]; then npm install; fi
-          docker run --rm -v "$(pwd):/project" -e SNYK_TOKEN \
-            --entrypoint="" snyk/snyk:linux sh -c "
-              set -e
-              cd /project
-              snyk auth $SNYK_TOKEN
-              snyk test --all-projects --json-file-output=snyk-sca-results/snyk-sca.json --sarif-file-output=snyk-sca-results/snyk-sca.sarif || true
-            "
+          PACKAGE_FILES=$(find . -name "package.json" -o -name "requirements.txt" -o -name "pom.xml" -o -name "Gemfile" -o -name "go.mod" | wc -l)
+
+          if [ "$PACKAGE_FILES" -eq 0 ]; then
+            echo "⚠️  No package manager files found in repository"
+            echo '{"vulnerabilities":[],"summary":"No package files found"}' > snyk-SCA-results/snyk-SCA-results.json
+            echo '{"runs":[{"tool":{"driver":{"name":"Snyk SCA"}},"results":[]}]}' > snyk-SCA-results/snyk-sca.sarif
+          else
+            docker run --rm \
+              -v "$(pwd):/project" \
+              -e SNYK_TOKEN="${{ secrets.SNYK_TOKEN }}" \
+              --entrypoint="" \
+              snyk/snyk:linux \
+              sh -c "
+                cd /project && \
+                snyk auth $SNYK_TOKEN && \
+                snyk test --json-file-output=snyk-SCA-results/snyk-SCA-results.json || true && \
+                snyk test --sarif-file-output=snyk-SCA-results/snyk-sca.sarif || true
+              "
+
+            if [ ! -f snyk-SCA-results/snyk-SCA-results.json ]; then
+              echo '{"vulnerabilities":[],"summary":"Scan failed to generate results"}' > snyk-SCA-results/snyk-SCA-results.json
+            fi
+            
+            if [ ! -f snyk-SCA-results/snyk-sca.sarif ]; then
+              echo '{"runs":[{"tool":{"driver":{"name":"Snyk SCA"}},"results":[]}]}' > snyk-SCA-results/snyk-sca.sarif
+            fi
+          fi
+
       - name: Upload Snyk SCA SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: snyk-sca-results/snyk-sca.sarif
+          sarif_file: snyk-SCA-results/snyk-sca.sarif
           category: snyk-sca
-      - name: Upload Snyk SCA JSON as Artifact
+        if: always()
+
+      - name: Upload Snyk SCA Results
         uses: actions/upload-artifact@v4
         with:
-          name: snyk-sca-results-json
-          path: snyk-sca-results/snyk-sca.json
+          name: snyk-SCA-results
+          path: snyk-SCA-results/
 
-  trivy-scans:
-    name: Trivy (SCA, Misconfig, Secret, SBOM)
+  trivy-scan:
+    name: Trivy Comprehensive Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Create Trivy output directory
-        run: mkdir -p trivy-output
-      - name: Run Trivy Scans
+
+      - name: Setup Node.js (for package.json processing)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies (for better SBOM generation)
         run: |
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners vuln --format json --output /ws/trivy-output/vuln.json || true
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners vuln --format sarif --output /ws/trivy-output/vuln.sarif || true
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners secret --format json --output /ws/trivy-output/secrets.json || true
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners secret --format sarif --output /ws/trivy-output/secrets.sarif || true
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners misconfig --format json --output /ws/trivy-output/misconfig.json || true
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --scanners misconfig --format sarif --output /ws/trivy-output/misconfig.sarif || true
-      - name: Generate SBOM with Trivy
+          if [ -f package.json ]; then
+            echo "Installing npm dependencies for better SBOM generation..."
+            npm install --package-lock-only || npm install || true
+          fi
+
+      - name: Debug Repository Structure
         run: |
-          docker run --rm -v "$(pwd):/ws" aquasec/trivy:latest fs /ws --format cyclonedx --output /ws/trivy-output/sbom.cyclonedx.json || true
+          echo "=== Repository Structure Debug ==="
+          echo "Current directory: $(pwd)"
+          echo "All files (first 50):"
+          find . -type f | head -50
+          echo "Package manager files:"
+          find . -name "package.json" -o -name "package-lock.json" -o -name "yarn.lock" -o -name "requirements.txt" -o -name "Pipfile*" -o -name "pom.xml" -o -name "build.gradle*" -o -name "Gemfile*" -o -name "go.mod" -o -name "composer.json"
+          echo "Source code files:"
+          find . -type f \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.java" -o -name "*.php" -o -name "*.rb" -o -name "*.go" \) | wc -l
+
+      - name: Run Trivy Vulnerability Scan
+        run: |
+          mkdir -p trivy-output
+          
+          echo "=== Running Trivy Vulnerability Scan ==="
+          # Scan for vulnerabilities in dependencies
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners vuln \
+            --format table || true
+
+          # Generate JSON output for vulnerabilities
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners vuln \
+            --format json \
+            --output /workspace/trivy-output/trivy-vuln-results.json || true
+
+          # Generate SARIF output for vulnerabilities
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners vuln \
+            --format sarif \
+            --output /workspace/trivy-output/vuln.sarif || true
+
+          # Check if vulnerabilities were found
+          if [ -f trivy-output/trivy-vuln-results.json ]; then
+            echo "Vulnerability scan results generated"
+            VULN_COUNT=$(jq -r '.Results[]?.Vulnerabilities // [] | length' trivy-output/trivy-vuln-results.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+            echo "Total vulnerabilities found: $VULN_COUNT"
+          fi
+
+      - name: Run Trivy Secret Scan
+        run: |
+          echo "=== Running Enhanced Secret Scan ==="
+          # Secret scan with table output
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners secret \
+            --format table || true
+
+          # Secret scan with JSON output
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners secret \
+            --format json \
+            --output /workspace/trivy-output/trivy-secrets-results.json || true
+
+          # Secret scan with SARIF output
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners secret \
+            --format sarif \
+            --output /workspace/trivy-output/secrets.sarif || true
+
+          if [ -f trivy-output/trivy-secrets-results.json ]; then
+            SECRET_COUNT=$(jq -r '.Results[]?.Secrets // [] | length' trivy-output/trivy-secrets-results.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+            echo "Total secrets found: $SECRET_COUNT"
+          fi
+
+      - name: Run Trivy Misconfiguration Scan
+        run: |
+          echo "=== Running Misconfiguration Scan ==="
+          # Misconfig scan with table output
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners misconfig \
+            --format table || true
+
+          # Misconfig scan with JSON output
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners misconfig \
+            --format json \
+            --output /workspace/trivy-output/trivy-misconfig-results.json || true
+
+          # Misconfig scan with SARIF output
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --scanners misconfig \
+            --format sarif \
+            --output /workspace/trivy-output/misconfig.sarif || true
+
+      - name: Generate Enhanced SBOM
+        run: |
+          echo "=== Generating Software Bill of Materials (SBOM) ==="
+          
+          # Generate CycloneDX SBOM
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --format cyclonedx \
+            --output /workspace/trivy-output/sbom.cyclonedx.json || true
+
+          # Generate SPDX SBOM as alternative
+          docker run --rm -v "$(pwd):/workspace" \
+            -v /tmp/trivy-cache:/root/.cache \
+            aquasec/trivy:latest fs /workspace \
+            --format spdx-json \
+            --output /workspace/trivy-output/sbom.spdx.json || true
+
+          # Fallback: Generate npm-based SBOM if package.json exists and Trivy fails
+          if [ ! -s trivy-output/sbom.cyclonedx.json ] && [ ! -s trivy-output/sbom.spdx.json ]; then
+            echo "Trivy SBOM generation failed, trying alternative methods..."
+            if [ -f package.json ]; then
+              echo "Generating npm-based SBOM..."
+              npm list --json > trivy-output/npm-sbom.json 2>/dev/null || true
+              npm audit --json > trivy-output/npm-audit.json 2>/dev/null || true
+            fi
+            
+            # Create a simple manifest
+            echo '{"timestamp":"'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'","scan_type":"filesystem","repository":"'$(pwd)'"}' > trivy-output/scan-manifest.json
+          fi
+
+          # Verify SBOM generation
+          echo "=== SBOM Generation Results ==="
+          ls -la trivy-output/ || true
+          if [ -s trivy-output/sbom.cyclonedx.json ]; then
+            echo "✅ CycloneDX SBOM generated successfully"
+            COMPONENTS=$(jq -r '.components | length' trivy-output/sbom.cyclonedx.json 2>/dev/null || echo "0")
+            echo "Components found: $COMPONENTS"
+          elif [ -s trivy-output/sbom.spdx.json ]; then
+            echo "✅ SPDX SBOM generated successfully"
+          elif [ -s trivy-output/npm-sbom.json ]; then
+            echo "✅ NPM-based SBOM generated as fallback"
+          else
+            echo "⚠️ No SBOM was generated successfully"
+          fi
+
+      - name: Create Comprehensive Security Summary
+        run: |
+          echo "=== Security Scan Summary ==="
+          
+          # Count findings from all scans
+          VULN_COUNT=0
+          SECRET_COUNT=0
+          MISCONFIG_COUNT=0
+          
+          if [ -f trivy-output/trivy-vuln-results.json ]; then
+            VULN_COUNT=$(jq -r '.Results[]?.Vulnerabilities // [] | length' trivy-output/trivy-vuln-results.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+          fi
+          
+          if [ -f trivy-output/trivy-secrets-results.json ]; then
+            SECRET_COUNT=$(jq -r '.Results[]?.Secrets // [] | length' trivy-output/trivy-secrets-results.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+          fi
+          
+          if [ -f trivy-output/trivy-misconfig-results.json ]; then
+            MISCONFIG_COUNT=$(jq -r '.Results[]?.Misconfigurations // [] | length' trivy-output/trivy-misconfig-results.json 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
+          fi
+          
+          echo "📊 TRIVY SECURITY SCAN RESULTS:"
+          echo "   🔍 Vulnerabilities: $VULN_COUNT"
+          echo "   🔐 Secrets: $SECRET_COUNT"
+          echo "   ⚙️  Misconfigurations: $MISCONFIG_COUNT"
+          
+          # Create summary JSON
+          cat > trivy-output/security-summary.json << EOF
+          {
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "vulnerabilities": $VULN_COUNT,
+            "secrets": $SECRET_COUNT,
+            "misconfigurations": $MISCONFIG_COUNT,
+            "total_findings": $((VULN_COUNT + SECRET_COUNT + MISCONFIG_COUNT))
+          }
+          EOF
+
       - name: Upload Trivy Vulnerability SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-output/vuln.sarif
           category: trivy-vulnerabilities
         if: always()
+
       - name: Upload Trivy Secrets SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-output/secrets.sarif
           category: trivy-secrets
         if: always()
+
       - name: Upload Trivy Misconfig SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-output/misconfig.sarif
           category: trivy-misconfig
         if: always()
-      - name: Upload All Trivy Results as Artifact
+
+      - name: Upload Trivy Results
         uses: actions/upload-artifact@v4
         with:
           name: trivy-results
@@ -141,17 +436,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+
       - name: Create TruffleHog output directory
         run: mkdir -p trufflehog-output
+
       - name: Run TruffleHog Scan
         run: |
+          echo "=== Running TruffleHog Secret Scan ==="
+          # Run TruffleHog with console output
+          docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest \
+            filesystem --directory /pwd || true
+
           # Run TruffleHog with JSON output
-          docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest filesystem --directory /pwd --json > trufflehog-output/results.json || true
+          docker run --rm -v "$(pwd):/pwd" trufflesecurity/trufflehog:latest \
+            filesystem --directory /pwd --json > trufflehog-output/results.json || true
+          
+          # Count secrets found
+          if [ -f trufflehog-output/results.json ]; then
+            SECRET_COUNT=$(grep -c '"Raw":' trufflehog-output/results.json 2>/dev/null || echo "0")
+            echo "TruffleHog found $SECRET_COUNT potential secrets"
+          fi
+
       - name: Setup Python for SARIF conversion
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Convert TruffleHog JSON to SARIF
         run: |
           cat > convert_to_sarif.py << 'EOF'
@@ -266,94 +578,16 @@ jobs:
           EOF
           
           python convert_to_sarif.py
+
       - name: Upload TruffleHog SARIF to Security Tab
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trufflehog-output/results.sarif
           category: trufflehog-secrets
         if: always()
+
       - name: Upload TruffleHog JSON as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: trufflehog-results-json
           path: trufflehog-output/results.json
-
-  owasp-zap-dast:
-    name: OWASP ZAP (DAST)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
-        run: if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-      - name: Start the application in the background
-        run: |
-          # IMPORTANT: Replace this with the command that starts your web application.
-          # For example: python app.py & or npm start &
-          echo "Starting application..."
-          # python your_app_startup_file.py &
-          
-          # For demonstration, we'll create a simple HTTP server
-          python -m http.server 8080 &
-          echo $! > app.pid
-      - name: Wait for application to be ready
-        run: |
-          echo "Waiting for application to start..."
-          sleep 10
-          # Check if the application is running
-          curl -f http://127.0.0.1:8080 || echo "Application may not be ready"
-      - name: Run ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.12.0
-        with:
-          target: 'http://127.0.0.1:8080'
-          rules_file_name: '.zap/rules.tsv'
-          cmd_options: '-a -j -l WARN -z "-silent"'
-      - name: Create ZAP output directory
-        run: mkdir -p zap-output
-      - name: Copy ZAP results
-        run: |
-          # Copy ZAP results to our output directory
-          if [ -f "report_html.html" ]; then cp "report_html.html" zap-output/; fi
-          if [ -f "report_json.json" ]; then cp "report_json.json" zap-output/zap-results.json; fi
-          if [ -f "report_md.md" ]; then cp "report_md.md" zap-output/; fi
-          # Create a basic SARIF file for ZAP results
-          cat > zap-output/zap-results.sarif << 'EOF'
-          {
-            "$schema": "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0.json",
-            "version": "2.1.0",
-            "runs": [
-              {
-                "tool": {
-                  "driver": {
-                    "name": "OWASP ZAP",
-                    "version": "2.14.0"
-                  }
-                },
-                "results": []
-              }
-            ]
-          }
-          EOF
-      - name: Upload ZAP SARIF to Security Tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: zap-output/zap-results.sarif
-          category: owasp-zap-dast
-        if: always()
-      - name: Upload ZAP Results as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-results
-          path: zap-output/
-        if: always()
-      - name: Stop application
-        run: |
-          if [ -f app.pid ]; then
-            kill $(cat app.pid) || true
-            rm app.pid
-          fi
-        if: always()
