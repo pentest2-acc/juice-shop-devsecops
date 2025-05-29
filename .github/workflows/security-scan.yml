@@ -20,6 +20,10 @@ jobs:
         run: |
           docker run --rm -v "$(pwd):/src" returntocorp/semgrep semgrep scan \
             --config auto \
+            --config="p/security-audit" \
+            --config="p/owasp-top-ten" \
+            --config "p/security-code-scan" \
+            --config "p/default"
             --error \
             --json > semgrep-results.json || true
 
